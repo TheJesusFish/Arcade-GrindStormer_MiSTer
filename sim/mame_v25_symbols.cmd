@@ -1,0 +1,3 @@
+focus :audiocpu
+symlist
+quit
