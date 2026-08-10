@@ -36,6 +36,7 @@
 /sim/transcript
 /sim/generated/
 /sim/artifacts/
+/sim/ 
 
 # Local captures, logs, and temporary probe artifacts
 *.log
