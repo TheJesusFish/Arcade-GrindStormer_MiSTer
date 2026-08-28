@@ -54,6 +54,26 @@ set_multicycle_path -setup -end -from [get_clocks {emu|pll|raizingpll_inst|alter
 set_multicycle_path -hold -end -from [get_clocks {emu|pll|raizingpll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk}] \
     -to [get_keepers {emu:emu|grind_stormer_game:u_game|red[*] emu:emu|grind_stormer_game:u_game|green[*] emu:emu|grind_stormer_game:u_game|blue[*] emu:emu|grind_stormer_game:u_game|HS emu:emu|grind_stormer_game:u_game|VS}] 13
 
+# The object-line FSM latches scroll_flip_latched and the initial old_y in
+# ST_IDLE, and updates old_y only in ST_DESC_PROCESS. The shortest route back to
+# the next ST_DESC_PROCESS is DECIDE->CAPTURE0->WAIT1->CAPTURE1->WAIT2->CAPTURE2
+# ->WAIT3->CAPTURE3->PROCESS, nine clocks; scroll_flip_latched is stable for the
+# whole build pass. Claim two, which both trivially satisfy.
+# desc_y is deliberately NOT included: ST_DESC_CAPTURE3 writes it and the very
+# next state consumes it, so that path is honestly single-cycle.
+set obj_slow [get_keepers {emu:emu|grind_stormer_game:u_game|grind_stormer_gp9001_video:u_video|grind_stormer_gp9001_object_line:u_object|old_y[*] \
+    emu:emu|grind_stormer_game:u_game|grind_stormer_gp9001_video:u_video|grind_stormer_gp9001_object_line:u_object|scroll_flip_latched[*]}]
+set obj_hits [get_keepers {emu:emu|grind_stormer_game:u_game|grind_stormer_gp9001_video:u_video|grind_stormer_gp9001_object_line:u_object|process_hits_line*}]
+set_multicycle_path -setup -from $obj_slow -to $obj_hits 2
+set_multicycle_path -hold  -from $obj_slow -to $obj_hits 1
+
+# jtframe_reset drives game_rst from negedge clk_rom (jtframe_reset.v:88), so its
+# loads get half a period. It is held for GAME_RSTW=8 shift steps and changes at
+# most once per reset event, so two cycles is a conservative claim.
+set game_rst_reg [get_keepers {emu:emu|jtframe_board:u_board|jtframe_reset:u_reset|game_rst}]
+set_multicycle_path -setup -from $game_rst_reg 2
+set_multicycle_path -hold  -from $game_rst_reg 1
+
 # JTFrame framework exceptions.
 set_false_path -to [get_keepers {audio_out:audio_out|cl1[*]}]
 set_false_path -to [get_keepers {audio_out:audio_out|cr1[*]}]
