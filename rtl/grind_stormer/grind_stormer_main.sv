@@ -7,6 +7,23 @@ module grind_stormer_main #(
     input              rst,
     input              halt_n,
 
+    input              hs_reset,
+    input      [1:0]   hs_rom_set_id,
+    input              hs_rom_identity_valid,
+    input              hs_config_download,
+    input              hs_config_wr,
+    input              hs_nvram_download,
+    input              hs_nvram_upload,
+    input              hs_nvram_wr,
+    input              hs_nvram_rd,
+    input      [26:0]  hs_addr,
+    input      [7:0]   hs_dout,
+    input              hs_ss_active,
+    output     [7:0]   hs_din,
+    output             hs_wait,
+    output             hs_dirty,
+    output             hs_active,
+
     output             rom_cs,
     output     [17:0]  rom_addr,
     input      [15:0]  rom_data,
@@ -103,6 +120,18 @@ wire        cpu_fc2;
 wire        cpu_vpa_n = ~&{cpu_fc0, cpu_fc1, cpu_fc2, ~cpu_as_n};
 wire        cpu_iack = !cpu_as_n && cpu_fc0 && cpu_fc1 && cpu_fc2;
 wire        cpu_program_space = cpu_fc1 && !cpu_fc0;
+
+wire hs_hold_request;
+reg  hs_hold_ack = 1'b0;
+wire hs_cpu_run = !hs_hold_request ||
+                  (cpu_bus_active && !hs_hold_ack);
+
+always @(posedge clk) begin
+    if (rst || !hs_hold_request || hs_ss_active)
+        hs_hold_ack <= 1'b0;
+    else if (!cpu_bus_active)
+        hs_hold_ack <= 1'b1;
+end
 
 assign cpu_bus_active = !cpu_as_n && (!cpu_uds_n || !cpu_lds_n);
 wire cpu_read = cpu_bus_active && cpu_rw;
@@ -318,11 +347,11 @@ jtframe_68kdtack_cen #(
 
 fx68k u_main68k (
     .clk      (clk),
-    .HALTn    (halt_n),
+    .HALTn    (halt_n && hs_cpu_run),
     .extReset (cpu_core_reset),
     .pwrUp    (cpu_core_reset),
-    .enPhi1   (cpu_cen && ss_cpu_run),
-    .enPhi2   (cpu_cenb && ss_cpu_run),
+    .enPhi1   (cpu_cen && ss_cpu_run && hs_cpu_run),
+    .enPhi2   (cpu_cenb && ss_cpu_run && hs_cpu_run),
     .eRWn     (cpu_rw),
     .ASn      (cpu_as_n),
     .LDSn     (cpu_lds_n),
@@ -389,6 +418,45 @@ wire [15:0] palette_dout;
 wire [12:0] ss_wram_addr;
 wire [15:0] ss_wram_data;
 wire [1:0]  ss_wram_we;
+wire [12:0] hs_ram_addr;
+wire [15:0] hs_ram_data;
+wire [1:0]  hs_ram_we;
+wire        hs_ram_owned;
+
+grind_stormer_highscore u_highscore (
+    .clk                (clk),
+    .reset              (hs_reset),
+    .cpu_reset          (cpu_core_reset),
+    .rom_set_id         (hs_rom_set_id),
+    .rom_identity_valid (hs_rom_identity_valid),
+    .config_download    (hs_config_download),
+    .config_wr          (hs_config_wr),
+    .config_addr        (hs_addr),
+    .config_data        (hs_dout),
+    .nvram_download     (hs_nvram_download),
+    .nvram_upload       (hs_nvram_upload),
+    .nvram_wr           (hs_nvram_wr),
+    .nvram_rd           (hs_nvram_rd),
+    .nvram_addr         (hs_addr),
+    .nvram_data         (hs_dout),
+    .nvram_q            (hs_din),
+    .nvram_wait         (hs_wait),
+    .ss_active          (hs_ss_active),
+    .normal_ram_addr    (cpu_addr8[13:1]),
+    .normal_ram_we      (wram_we),
+    .normal_ram_data    (cpu_dout),
+    .hold_request       (hs_hold_request),
+    .hold_ack           (hs_hold_ack),
+    .ram_owned          (hs_ram_owned),
+    .ram_addr           (hs_ram_addr),
+    .ram_we             (hs_ram_we),
+    .ram_data           (hs_ram_data),
+    .ram_q              (wram_scan_dout),
+    .dirty              (hs_dirty),
+    .active             (hs_active),
+    .config_valid       (),
+    .active_profile     ()
+);
 
 grind_stormer_ss_ram_port #(
     .WIDTH        (16),
@@ -399,9 +467,9 @@ grind_stormer_ss_ram_port #(
 ) u_wram_ss (
     .clk            (clk),
     .restore_enable (ss_restore_enable),
-    .normal_we      (2'b00),
-    .normal_addr    (wram_scan_addr),
-    .normal_data    (16'd0),
+    .normal_we      (hs_ram_we),
+    .normal_addr    (hs_ram_owned ? hs_ram_addr : wram_scan_addr),
+    .normal_data    (hs_ram_data),
     .ram_we         (ss_wram_we),
     .ram_addr       (ss_wram_addr),
     .ram_data       (ss_wram_data),

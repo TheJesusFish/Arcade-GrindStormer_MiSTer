@@ -24,5 +24,6 @@ set_global_assignment -name VERILOG_FILE rtl/grind_stormer/grind_stormer_opm.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/grind_stormer/grind_stormer_sound_mixer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/grind_stormer/grind_stormer_sound.sv
 set_global_assignment -name QIP_FILE rtl/modules/ikaopm/src/IKAOPM.qip
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/grind_stormer/grind_stormer_highscore.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/grind_stormer/grind_stormer_main.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/grind_stormer/grind_stormer_game.sv
