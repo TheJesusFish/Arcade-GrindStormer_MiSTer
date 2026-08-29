@@ -62,7 +62,8 @@ set_multicycle_path -hold -end -from [get_clocks {emu|pll|raizingpll_inst|altera
 # desc_y is deliberately NOT included: ST_DESC_CAPTURE3 writes it and the very
 # next state consumes it, so that path is honestly single-cycle.
 set obj_slow [get_keepers {emu:emu|grind_stormer_game:u_game|grind_stormer_gp9001_video:u_video|grind_stormer_gp9001_object_line:u_object|old_y[*] \
-    emu:emu|grind_stormer_game:u_game|grind_stormer_gp9001_video:u_video|grind_stormer_gp9001_object_line:u_object|scroll_flip_latched[*]}]
+    emu:emu|grind_stormer_game:u_game|grind_stormer_gp9001_video:u_video|grind_stormer_gp9001_object_line:u_object|scroll_flip_latched[*] \
+    emu:emu|grind_stormer_game:u_game|grind_stormer_gp9001_video:u_video|grind_stormer_gp9001_object_line:u_object|scrolls_latched[*]}]
 set obj_hits [get_keepers {emu:emu|grind_stormer_game:u_game|grind_stormer_gp9001_video:u_video|grind_stormer_gp9001_object_line:u_object|process_hits_line*}]
 set_multicycle_path -setup -from $obj_slow -to $obj_hits 2
 set_multicycle_path -hold  -from $obj_slow -to $obj_hits 1
@@ -73,6 +74,17 @@ set_multicycle_path -hold  -from $obj_slow -to $obj_hits 1
 set game_rst_reg [get_keepers {emu:emu|jtframe_board:u_board|jtframe_reset:u_reset|game_rst}]
 set_multicycle_path -setup -from $game_rst_reg 2
 set_multicycle_path -hold  -from $game_rst_reg 1
+
+# Every register in the hq2x blender advances on ce_x4i. sys/scandoubler.v
+# places it at pc_in == pixsz4, pixsz2, pixsz2+pixsz4 and pixsz; with pxl_cen
+# at one clock in fourteen (grind_stormer_game.sv:1387) that is 3, 7, 10 and
+# 14, so the blender gets at least three master clocks between updates. Does
+# not hold before pixsz is first measured, which is display-only and
+# self-clears. Scoped to blender-internal paths so the other scandoubler
+# enables stay honest.
+set hq2x_keepers [get_keepers {*|Hq2x:Hq2x|Blend:blender|*}]
+set_multicycle_path -setup -from $hq2x_keepers -to $hq2x_keepers 3
+set_multicycle_path -hold  -from $hq2x_keepers -to $hq2x_keepers 2
 
 # JTFrame framework exceptions.
 set_false_path -to [get_keepers {audio_out:audio_out|cl1[*]}]
