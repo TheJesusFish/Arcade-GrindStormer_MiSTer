@@ -1095,6 +1095,7 @@ grind_stormer_sound u_sound (
     .clk                 (clk),
     .v25_enable          (main_v25_reset_n),
     .state_hold          (ss_sound_hold),
+    .pause               (~dip_pause),
     .ss_restore_enable   (ss_restore_compatible),
     .ss_restore_commit   (ss_restore_commit),
     .ss_data             (ss_data),

@@ -379,6 +379,7 @@ grind_stormer_sound u_sound (
     .jmpr                (8'h90),
     .ym_enable           (1'b1),
     .state_hold          (sound_state_hold),
+    .pause               (1'b0),
     .main_shared_write   (test_shared_override ?
                           1'b1 : main_debug_events[3]),
     .main_shared_addr    (test_shared_override ?

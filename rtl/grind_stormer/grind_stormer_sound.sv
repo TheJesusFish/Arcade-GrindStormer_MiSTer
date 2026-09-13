@@ -23,6 +23,7 @@ module grind_stormer_sound #(
     input      [7:0]            jmpr,
     input                       ym_enable,
     input                       state_hold,
+    input                       pause,
     input                       main_shared_write,
     input      [14:0]           main_shared_addr,
     input      [7:0]            main_shared_data,
@@ -130,6 +131,9 @@ wire restore_restart =
     baseline_restore_memory_active ||
     (ss_restore_commit && ss_restore_enable);
 wire sound_domain_reset = reset || restore_restart;
+// GRSS0001 intentionally runs IKAOPM while state_hold is asserted so the
+// rebooted V25 can consume and acknowledge its replayed BGM command.
+wire playback_hold = pause;
 
 // Exact 94.5 MHz * 20 / 189 = 10 MHz V25 enable.
 reg [7:0] v25_cen_accum = 8'd0;
@@ -138,20 +142,27 @@ reg       v25_cen = 1'b0;
 // Long-run tests restore after the bootstrap and can step one 10 MHz V25
 // phase per host edge. YM below retains the exact 80:27 phase ratio.
 always @(posedge clk) begin
-    v25_cen <= !sound_domain_reset;
-    if (sound_domain_reset)
+    if (sound_domain_reset) begin
+        v25_cen <= 1'b0;
         v25_cen_accum <= 8'd0;
+    end else if (pause) begin
+        v25_cen <= 1'b0;
+    end else begin
+        v25_cen <= 1'b1;
+    end
 end
 `else
 always @(posedge clk) begin
     v25_cen <= 1'b0;
     if (sound_domain_reset) begin
         v25_cen_accum <= 8'd0;
-    end else if (v25_cen_accum >= 8'd169) begin
-        v25_cen_accum <= v25_cen_accum + 8'd20 - 8'd189;
-        v25_cen <= 1'b1;
-    end else begin
-        v25_cen_accum <= v25_cen_accum + 8'd20;
+    end else if (!pause) begin
+        if (v25_cen_accum >= 8'd169) begin
+            v25_cen_accum <= v25_cen_accum + 8'd20 - 8'd189;
+            v25_cen <= 1'b1;
+        end else begin
+            v25_cen_accum <= v25_cen_accum + 8'd20;
+        end
     end
 end
 `endif
@@ -161,6 +172,7 @@ end
 reg [5:0] ym_divider = 6'd0;
 reg       ym_cen = 1'b0;
 reg       ym_cen_p1 = 1'b0;
+wire      ym_ready;
 `ifdef GRINDSTORMER_SOUND_ACCELERATED_SIM
 reg [6:0] ym_accum = 7'd0;
 reg       ym_half_toggle = 1'b0;
@@ -171,13 +183,15 @@ always @(posedge clk) begin
         ym_divider <= 6'd0;
         ym_accum <= 7'd0;
         ym_half_toggle <= 1'b0;
-    end else if (ym_accum >= 7'd53) begin
-        ym_accum <= ym_accum - 7'd53;
-        ym_cen <= 1'b1;
-        ym_cen_p1 <= ym_half_toggle;
-        ym_half_toggle <= !ym_half_toggle;
-    end else begin
-        ym_accum <= ym_accum + 7'd27;
+    end else if (!playback_hold || !ym_ready) begin
+        if (ym_accum >= 7'd53) begin
+            ym_accum <= ym_accum - 7'd53;
+            ym_cen <= 1'b1;
+            ym_cen_p1 <= ym_half_toggle;
+            ym_half_toggle <= !ym_half_toggle;
+        end else begin
+            ym_accum <= ym_accum + 7'd27;
+        end
     end
 end
 `else
@@ -186,14 +200,16 @@ always @(posedge clk) begin
     ym_cen_p1 <= 1'b0;
     if (sound_domain_reset) begin
         ym_divider <= 6'd0;
-    end else if (ym_divider == 6'd55) begin
-        ym_divider <= 6'd0;
-        ym_cen <= 1'b1;
-        ym_cen_p1 <= 1'b1;
-    end else begin
-        ym_divider <= ym_divider + 6'd1;
-        if (ym_divider == 6'd27)
+    end else if (!playback_hold || !ym_ready) begin
+        if (ym_divider == 6'd55) begin
+            ym_divider <= 6'd0;
             ym_cen <= 1'b1;
+            ym_cen_p1 <= 1'b1;
+        end else begin
+            ym_divider <= ym_divider + 6'd1;
+            if (ym_divider == 6'd27)
+                ym_cen <= 1'b1;
+        end
     end
 end
 `endif
@@ -207,7 +223,7 @@ always @(posedge clk or posedge sound_domain_reset) begin
         ym_reset_count <= ym_reset_count + 6'd1;
 end
 wire ym_reset = sound_domain_reset || !ym_reset_count[5];
-wire ym_ready = !ym_reset;
+assign ym_ready = !ym_reset;
 
 // Both initial boot and restore release the V25 only after IKAOPM has
 // completed a full reset rotation.
@@ -249,9 +265,9 @@ reg [7:0] bgm_replay_argument = 8'd0;
 reg       bgm_replay_valid = 1'b0;
 reg       mailbox_ready = 1'b0;
 wire bgm_replay_write_argument =
-    bgm_replay_state == BGM_REPLAY_WRITE_ARG;
+    (bgm_replay_state == BGM_REPLAY_WRITE_ARG) && !pause;
 wire bgm_replay_write_command =
-    bgm_replay_state == BGM_REPLAY_WRITE_COMMAND;
+    (bgm_replay_state == BGM_REPLAY_WRITE_COMMAND) && !pause;
 wire bgm_replay_hold_v25 =
     (bgm_replay_state == BGM_REPLAY_WRITE_ARG) ||
     (bgm_replay_state == BGM_REPLAY_WRITE_COMMAND) ||
@@ -327,7 +343,7 @@ grind_stormer_v25_cpu #(
     .clk               (clk),
     .reset             (reset),
     .reset_n           (v25_reset_n),
-    .clock_enable      (v25_cen && !v25_hold_boundary),
+    .clock_enable      (v25_cen && !pause && !v25_hold_boundary),
     // TP-027 active-low V25 ports: P0=DSWB, P1=JMPR, PT=DSWA.
     .port0_in          (~dip_b),
     .port1_in          (~jmpr),
@@ -593,7 +609,7 @@ always @(posedge clk) begin
         bgm_replay_command <= restored_bgm_command;
         bgm_replay_argument <= restored_bgm_argument;
         bgm_replay_valid <= restored_bgm_valid;
-    end else begin
+    end else if (!pause) begin
         case (bgm_replay_state)
             BGM_REPLAY_WAIT_READY: begin
                 if (state_hold && ym_ready && !restore_restart &&
@@ -720,6 +736,8 @@ grind_stormer_opm u_ym2151 (
     .right  (ym_right)
 );
 
+wire signed [15:0] mixed_mono;
+
 grind_stormer_sound_mixer u_mixer (
     .clk       (clk),
     .reset     (ym_reset),
@@ -727,8 +745,10 @@ grind_stormer_sound_mixer u_mixer (
     .ym_left   (ym_left),
     .ym_right  (ym_right),
     .ym_enable (ym_enable),
-    .mono      (snd_mono)
+    .mono      (mixed_mono)
 );
+
+assign snd_mono = pause ? 16'sd0 : mixed_mono;
 
 wire [63:0] policy_ss_data_out;
 wire policy_ss_ack;

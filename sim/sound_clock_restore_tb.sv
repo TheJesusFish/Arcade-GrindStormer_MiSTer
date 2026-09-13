@@ -7,12 +7,15 @@ reg reset = 1'b1;
 reg v25_enable = 1'b0;
 reg ss_restore_enable = 1'b0;
 reg ss_restore_commit = 1'b0;
+reg pause = 1'b1;
 reg main_shared_write = 1'b0;
 reg [14:0] main_shared_addr = 15'd0;
 reg [7:0] main_shared_data = 8'd0;
 wire debug_v25_cen;
 wire debug_ym_cen;
 wire debug_ym_cen_p1;
+wire debug_v25_reset_n;
+wire [19:0] debug_pc;
 wire [14:0] shared_addr;
 wire [7:0] shared_dout;
 wire shared_we;
@@ -22,6 +25,9 @@ integer v25_count;
 integer ym_count;
 integer ym_p1_count;
 integer i;
+reg [7:0] paused_v25_phase;
+reg [5:0] paused_ym_phase;
+reg [19:0] paused_pc;
 
 always #5 clk = ~clk;
 
@@ -34,6 +40,7 @@ grind_stormer_sound dut (
     .jmpr                (8'h90),
     .ym_enable           (1'b1),
     .state_hold          (1'b0),
+    .pause               (pause),
     .main_shared_write   (main_shared_write),
     .main_shared_addr    (main_shared_addr),
     .main_shared_data    (main_shared_data),
@@ -55,11 +62,11 @@ grind_stormer_sound dut (
     .sample              (sample),
     .debug_fault         (),
     .debug_halted        (),
-    .debug_pc            (),
+    .debug_pc            (debug_pc),
     .debug_state_idle    (),
     .state_idle          (),
     .state_held          (),
-    .debug_v25_reset_n   (),
+    .debug_v25_reset_n   (debug_v25_reset_n),
     .debug_ym_write      (),
     .debug_ym_a0         (),
     .debug_ym_data       (),
@@ -94,6 +101,34 @@ initial begin
     reset <= 1'b0;
     dut.baseline_valid = 1'b1;
 
+    // Pause during startup must not deadlock IKAOPM reset. Once ready, every
+    // runtime phase and the V25 remain bit-exactly held while output is zero.
+    wait (dut.ym_ready);
+    @(negedge clk);
+    v25_enable = 1'b1;
+    wait (debug_v25_reset_n);
+    repeat (4) @(posedge clk);
+    #1;
+
+    force dut.mixed_mono = 16'sh2345;
+    paused_v25_phase = dut.v25_cen_accum;
+    paused_ym_phase = dut.ym_divider;
+    paused_pc = debug_pc;
+    for (i = 0; i < 1024; i = i + 1) begin
+        @(posedge clk);
+        #1;
+        if (debug_v25_cen || debug_ym_cen || debug_ym_cen_p1 || sample)
+            $fatal(1, "sound state advanced while paused at cycle %0d", i);
+        if (snd_mono !== 16'sd0)
+            $fatal(1, "paused output was %0d, expected digital silence", snd_mono);
+        if (dut.v25_cen_accum !== paused_v25_phase ||
+            dut.ym_divider !== paused_ym_phase ||
+            debug_pc !== paused_pc)
+            $fatal(1, "V25 or IKAOPM phase changed while paused");
+    end
+
+    @(negedge clk);
+    pause = 1'b0;
     count_window(756);
     if (v25_count != 80)
         $fatal(1, "V25 enable ratio is %0d/756, expected 80", v25_count);
@@ -101,6 +136,12 @@ initial begin
         $fatal(1, "IKAOPM enable ratio is %0d/756, expected 27", ym_count);
     if (ym_p1_count != 13)
         $fatal(1, "IKAOPM p1 ratio is %0d/756, expected 13", ym_p1_count);
+    if (snd_mono !== 16'sh2345)
+        $fatal(1, "audio did not resume from the held mixer output");
+    release dut.mixed_mono;
+
+    @(negedge clk);
+    v25_enable = 1'b0;
 
     @(negedge clk);
     ss_restore_enable <= 1'b1;

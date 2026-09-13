@@ -108,7 +108,7 @@ set_global_assignment -name VERILOG_MACRO "JTFRAME_STEREO=1"
 set_global_assignment -name VERILOG_MACRO "STEREO_GAME=1"
 
 ### PCB Configuration
-set_global_assignment -name VERILOG_MACRO "JTFRAME_BUTTONS=2"
+set_global_assignment -name VERILOG_MACRO "JTFRAME_BUTTONS=3"
 set_global_assignment -name VERILOG_MACRO "JTFRAME_MR_DDRLOAD=1"
 #set_global_assignment -name VERILOG_MACRO "JTFRAME_MRA_DIP=1"
 
@@ -117,7 +117,7 @@ set_global_assignment -name VERILOG_MACRO "JTFRAME_OSD_NOCREDITS=1"
 set_global_assignment -name VERILOG_MACRO "JTFRAME_OSD_NOLOAD=1"
 set_global_assignment -name VERILOG_MACRO "JTFRAME_OSD_NOLOGO=1"
 set_global_assignment -name VERILOG_MACRO "SEPARATOR=-;"
-set_global_assignment -name VERILOG_MACRO "DATE=20260826"
+set_global_assignment -name VERILOG_MACRO "DATE=20260913"
 #set_global_assignment -name VERILOG_MACRO "NOCREDITS=1"
 
 set_global_assignment -name VERILOG_MACRO "SYNTHESIS=1"

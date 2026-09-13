@@ -94,6 +94,7 @@ grind_stormer_sound dut (
     .jmpr                (8'h90),
     .ym_enable           (1'b1),
     .state_hold          (state_hold),
+    .pause               (1'b0),
     .main_shared_write   (main_shared_write),
     .main_shared_addr    (main_shared_addr),
     .main_shared_data    (main_shared_data),
