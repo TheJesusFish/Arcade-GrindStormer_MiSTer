@@ -360,10 +360,20 @@ always @(posedge clk) begin
 end
 
 reg [63:0] state_memory [0:131071];
+reg [7:0] external_state_bytes [0:1048575];
 reg state_read_seen = 1'b0;
 reg state_write_seen = 1'b0;
 integer state_byte;
 integer state_write_max = 0;
+string external_state_path;
+string external_frame_path;
+string external_late_frame_path;
+string state_dump_path;
+integer external_state_fd;
+integer external_state_bytes_read;
+integer external_state_index;
+reg external_state_enabled = 1'b0;
+reg state_dump_only = 1'b0;
 
 assign state_ddr.busy = 1'b0;
 
@@ -516,12 +526,15 @@ reg pixel_capture = 1'b0;
 reg pixel_capture_done = 1'b0;
 reg [63:0] pixel_capture_hash = FNV_OFFSET;
 integer pixel_capture_count = 0;
+integer pixel_output_fd = 0;
 
 always @(negedge clk) begin
     if (pixel_capture && pxl_cen && lhbl && lvbl) begin
         pixel_capture_hash =
             fnv_byte(fnv_byte(fnv_byte(pixel_capture_hash, red),
                               green), blue);
+        if (pixel_output_fd != 0)
+            $fwrite(pixel_output_fd, "%c%c%c", red, green, blue);
         pixel_capture_count = pixel_capture_count + 1;
         if (pixel_capture_count == VISIBLE_PIXELS) begin
             pixel_capture <= 1'b0;
@@ -549,6 +562,43 @@ task automatic capture_next_visible_frame;
         if (pixel_capture_count != VISIBLE_PIXELS)
             $fatal(1, "visible-frame pixel count %0d", pixel_capture_count);
         hash = pixel_capture_hash;
+    end
+endtask
+
+task automatic capture_next_visible_frame_file;
+    input string path;
+    output reg [63:0] hash;
+    begin
+        pixel_output_fd = $fopen(path, "wb");
+        if (pixel_output_fd == 0)
+            $fatal(1, "could not create external-state frame %s", path);
+        $fwrite(pixel_output_fd, "P6\n320 240\n255\n");
+        capture_next_visible_frame(hash);
+        $fclose(pixel_output_fd);
+        pixel_output_fd = 0;
+    end
+endtask
+
+task automatic dump_state_binary;
+    integer output_fd;
+    integer word_index;
+    integer byte_index;
+    begin
+        if (state_dump_path.len() == 0)
+            disable dump_state_binary;
+        output_fd = $fopen(state_dump_path, "wb");
+        if (output_fd == 0)
+            $fatal(1, "could not create save-state dump %s",
+                state_dump_path);
+        for (word_index = 0; word_index <= state_write_max;
+             word_index = word_index + 1)
+            for (byte_index = 0; byte_index < 8;
+                 byte_index = byte_index + 1)
+                $fwrite(output_fd, "%c",
+                    state_memory[word_index][byte_index*8 +: 8]);
+        $fclose(output_fd);
+        $display("LANDMARK state_dump path=%s bytes=%0d",
+            state_dump_path, (state_write_max + 1) * 8);
     end
 endtask
 
@@ -765,6 +815,150 @@ task automatic compare_restored_global;
             $fatal(1, "coin/V25 release latch restore mismatch");
         if (u_game.ss_restore_ssp !== saved_ssp)
             $fatal(1, "saved SSP metadata restore mismatch");
+    end
+endtask
+
+function automatic [15:0] external_state_u16;
+    input integer descriptor_word;
+    input integer element;
+    reg [63:0] packed_word;
+    begin
+        packed_word = state_memory[
+            descriptor_word + 1 + (element >> 2)];
+        external_state_u16 =
+            packed_word >> ((element & 3) * 16);
+    end
+endfunction
+
+task automatic compare_external_video_state;
+    integer descriptor_index;
+    integer palette_descriptor;
+    integer vram_descriptor;
+    integer register_descriptor;
+    integer object0_descriptor;
+    integer object1_descriptor;
+    reg [15:0] expected_word;
+    begin
+        palette_descriptor = -1;
+        vram_descriptor = -1;
+        register_descriptor = -1;
+        object0_descriptor = -1;
+        object1_descriptor = -1;
+
+        for (descriptor_index = 1;
+             descriptor_index <= state_write_max;
+             descriptor_index = descriptor_index + 1) begin
+            if (state_memory[descriptor_index][63:61] == 3'd0 &&
+                state_memory[descriptor_index][55:34] == 22'd0 &&
+                state_memory[descriptor_index][33:32] == 2'd1) begin
+                case (state_memory[descriptor_index][60:56])
+                    5'd4: if (state_memory[descriptor_index][31:0] ==
+                                 32'd2048)
+                        palette_descriptor = descriptor_index;
+                    5'd5: if (state_memory[descriptor_index][31:0] ==
+                                 32'd8192)
+                        vram_descriptor = descriptor_index;
+                    5'd6: if (state_memory[descriptor_index][31:0] ==
+                                 32'd11)
+                        register_descriptor = descriptor_index;
+                    5'd7: if (state_memory[descriptor_index][31:0] ==
+                                 32'd1024)
+                        object0_descriptor = descriptor_index;
+                    5'd8: if (state_memory[descriptor_index][31:0] ==
+                                 32'd1024)
+                        object1_descriptor = descriptor_index;
+                    default: begin end
+                endcase
+            end
+        end
+
+        if (palette_descriptor < 0 || vram_descriptor < 0 ||
+            register_descriptor < 0 || object0_descriptor < 0 ||
+            object1_descriptor < 0)
+            $fatal(1,
+                "external video descriptors missing: %0d %0d %0d %0d %0d",
+                palette_descriptor, vram_descriptor,
+                register_descriptor, object0_descriptor,
+                object1_descriptor);
+
+        for (snapshot_index = 0; snapshot_index < 2048;
+             snapshot_index = snapshot_index + 1) begin
+            expected_word = external_state_u16(
+                palette_descriptor, snapshot_index);
+            if ({
+                    u_game.u_main.u_palette_ram.u_hi.u_ram.mem[
+                        snapshot_index],
+                    u_game.u_main.u_palette_ram.u_lo.u_ram.mem[
+                        snapshot_index]
+                } !== expected_word)
+                $fatal(1,
+                    "external palette restore mismatch at %04x",
+                    snapshot_index);
+        end
+
+        for (snapshot_index = 0; snapshot_index < 8192;
+             snapshot_index = snapshot_index + 1) begin
+            expected_word = external_state_u16(
+                vram_descriptor, snapshot_index);
+            if ({
+                    u_game.u_main.u_gp0.u_vram.u_hi.u_ram.mem[
+                        snapshot_index],
+                    u_game.u_main.u_gp0.u_vram.u_lo.u_ram.mem[
+                        snapshot_index]
+                } !== expected_word)
+                $fatal(1,
+                    "external GP9001 VRAM restore mismatch at %04x",
+                    snapshot_index);
+        end
+
+        for (snapshot_index = 0; snapshot_index < 1024;
+             snapshot_index = snapshot_index + 1) begin
+            expected_word = external_state_u16(
+                object0_descriptor, snapshot_index);
+            if ({
+                    u_game.u_main.u_gp0.u_obj_bank0.u_hi.u_ram.mem[
+                        snapshot_index],
+                    u_game.u_main.u_gp0.u_obj_bank0.u_lo.u_ram.mem[
+                        snapshot_index]
+                } !== expected_word)
+                $fatal(1,
+                    "external object bank 0 mismatch at %04x",
+                    snapshot_index);
+            expected_word = external_state_u16(
+                object1_descriptor, snapshot_index);
+            if ({
+                    u_game.u_main.u_gp0.u_obj_bank1.u_hi.u_ram.mem[
+                        snapshot_index],
+                    u_game.u_main.u_gp0.u_obj_bank1.u_lo.u_ram.mem[
+                        snapshot_index]
+                } !== expected_word)
+                $fatal(1,
+                    "external object bank 1 mismatch at %04x",
+                    snapshot_index);
+        end
+
+        expected_word = external_state_u16(register_descriptor, 0);
+        if (u_game.u_main.u_gp0.ptr !== expected_word[12:0])
+            $fatal(1, "external GP9001 pointer mismatch");
+        expected_word = external_state_u16(register_descriptor, 1);
+        if (u_game.u_main.u_gp0.scroll_select !== expected_word[7:0])
+            $fatal(1, "external GP9001 selector mismatch");
+        for (snapshot_index = 0; snapshot_index < 8;
+             snapshot_index = snapshot_index + 1)
+            if (u_game.u_main.u_gp0.scroll_reg[snapshot_index] !==
+                external_state_u16(
+                    register_descriptor, snapshot_index + 2))
+                $fatal(1,
+                    "external GP9001 scroll mismatch at %0d",
+                    snapshot_index);
+        expected_word = external_state_u16(register_descriptor, 10);
+        if (u_game.u_main.u_gp0.flip_reg !== expected_word[7:0] ||
+            u_game.u_main.u_gp0.obj_active_bank !== expected_word[8] ||
+            u_game.u_main.u_gp0.obj_snapshot_valid !== expected_word[9])
+            $fatal(1, "external GP9001 ownership/flip mismatch");
+
+        $display(
+            "LANDMARK external_video_state_exact palette=2048 vram=8192 objects=2048 regs=11");
     end
 endtask
 
@@ -1039,6 +1233,9 @@ reg [63:0] repeat_video_hash;
 reg [63:0] reload_video_hash;
 reg [63:0] invalid_before_hash;
 reg [63:0] invalid_after_hash;
+reg [63:0] external_video_hash_0;
+reg [63:0] external_video_hash_1;
+reg [63:0] external_video_hash_120;
 reg [63:0] corrupted_word;
 integer writes_before_invalid;
 longint unsigned nonzero_before_window;
@@ -1074,6 +1271,14 @@ initial begin
     void'($value$plusargs("DUMP_SOUND_V25=%s", sound_v25_path));
     void'($value$plusargs(
         "DUMP_SOUND_POLICY=%s", sound_policy_path));
+    external_state_enabled = $value$plusargs(
+        "EXTERNAL_STATE_BIN=%s", external_state_path);
+    void'($value$plusargs(
+        "EXTERNAL_FRAME_PPM=%s", external_frame_path));
+    void'($value$plusargs(
+        "EXTERNAL_LATE_FRAME_PPM=%s", external_late_frame_path));
+    void'($value$plusargs("DUMP_STATE_BIN=%s", state_dump_path));
+    state_dump_only = $test$plusargs("DUMP_STATE_ONLY");
     if (save_frame < 90)
         $fatal(1, "SAVE_FRAME must be at least 90");
     if (post_restore_frames < 0)
@@ -1101,6 +1306,28 @@ initial begin
     end
     $readmemh(main_hex_path, main_rom);
     $readmemh(gfx_hex_path, gfx_rom);
+    if (external_state_enabled) begin
+        external_state_fd = $fopen(external_state_path, "rb");
+        if (external_state_fd == 0)
+            $fatal(1, "could not open external save state");
+        external_state_bytes_read =
+            $fread(external_state_bytes, external_state_fd);
+        $fclose(external_state_fd);
+        if (external_state_bytes_read <= 0 ||
+            (external_state_bytes_read & 7) != 0)
+            $fatal(1, "invalid external save-state length %0d",
+                external_state_bytes_read);
+        for (external_state_index = 0;
+             external_state_index < external_state_bytes_read;
+             external_state_index = external_state_index + 8) begin
+            for (state_byte = 0; state_byte < 8;
+                 state_byte = state_byte + 1)
+                state_memory[external_state_index >> 3]
+                    [state_byte*8 +: 8] =
+                    external_state_bytes[external_state_index + state_byte];
+        end
+        state_write_max = (external_state_bytes_read >> 3) - 1;
+    end
     if ({main_rom[0], main_rom[1]} !== 32'h0010_4000 ||
         {main_rom[2], main_rom[3]} !== expected_reset_pc)
         $fatal(1, "unexpected official-set reset vectors");
@@ -1126,11 +1353,50 @@ initial begin
         $fatal(1,
             "real-ROM save point lacks sustained boot/audio evidence");
 
+    if (external_state_enabled) begin
+        commits_before_restore = restore_commit_count;
+        pulse_restore();
+        while (!u_game.ss_restore_commit && !ss_validation_error)
+            @(negedge clk);
+        if (ss_validation_error)
+            $fatal(1,
+                "external state rejected set=%0d crc64=%016x crc32=%08x",
+                u_game.rom_set_id, u_game.rom_stream_crc64,
+                u_game.rom_program_crc32);
+        compare_external_video_state();
+        wait_state_idle();
+        if (restore_commit_count != commits_before_restore + 1)
+            $fatal(1, "external restore commit count mismatch");
+        if (external_frame_path.len() != 0)
+            capture_next_visible_frame_file(
+                external_frame_path, external_video_hash_0);
+        else
+            capture_next_visible_frame(external_video_hash_0);
+        capture_next_visible_frame(external_video_hash_1);
+        wait_frames(120);
+        if (external_late_frame_path.len() != 0)
+            capture_next_visible_frame_file(
+                external_late_frame_path, external_video_hash_120);
+        else
+            capture_next_visible_frame(external_video_hash_120);
+        if (u_game.sound_debug_fault || u_game.sound_debug_halted)
+            $fatal(1, "external restore left V25 unhealthy");
+        $display(
+            "PASS realrom_savestate_tb external bytes=%0d set=%0d video0=%016x video1=%016x video120=%016x ym=%0d nonzero_audio=%0d writes=%0d commits=%0d",
+            external_state_bytes_read, u_game.rom_set_id,
+            external_video_hash_0, external_video_hash_1,
+            external_video_hash_120, ym_total_writes,
+            nonzero_sample_count, architectural_write_count,
+            restore_commit_count);
+        $finish;
+    end
+
     pulse_save();
     while (!ss_write_start)
         @(negedge clk);
     capture_saved_architecture();
     wait_state_idle();
+    dump_state_binary();
 
     if (!state_seen[2] || !state_seen[3] || !state_seen[4] ||
         !state_seen[5] || !state_seen[10] || !state_seen[13])
@@ -1146,6 +1412,12 @@ initial begin
     if (state_write_max < 100)
         $fatal(1, "save stream unexpectedly short: last word %0d",
             state_write_max);
+    if (state_dump_only) begin
+        $display(
+            "PASS realrom_savestate_tb dump_only frame=%0d bytes=%0d ssp=%08x",
+            frame_count, (state_write_max + 1) * 8, saved_ssp);
+        $finish;
+    end
     dump_sound_restore_fixture();
 
     capture_next_visible_frame(golden_video_hash);
